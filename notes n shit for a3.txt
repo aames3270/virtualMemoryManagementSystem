@@ -1,0 +1,282 @@
+PAGETABLE HEADER:
+
+//Alberto Ames
+//827838213
+
+#ifndef ASSIGNMENT1__PAGETABLE_H
+#define ASSIGNMENT1__PAGETABLE_H
+
+#include <vector>
+#include <string>
+
+using namespace std;
+
+struct Map {
+    unsigned int vpn;
+    unsigned int pfn;
+};
+
+class nextLevelPtr;
+
+class PageTable {
+
+public:
+    PageTable(const std::string& bitLevels);
+
+    unsigned int extractPageNumberFromAddress(unsigned int address, unsigned int mask, unsigned int shift);
+    unsigned int extractVPN(unsigned int address);
+    void recordPageAccess(unsigned int address);
+    Map* lookup_vpn2pfn(unsigned int address);
+    void insert_vpn2pfn(unsigned int address, unsigned int frame);
+    unsigned long int getTotalEntries() const;
+
+
+
+    vector<int> levelCount; //Array for amount of bit for each level.
+    vector<unsigned int> bitMaskArray; //Mask array..
+    vector<unsigned int> shiftArray; //Bit shifting array..
+    nextLevelPtr* root; //Pointer to root.
+
+};
+
+class nextLevelPtr {
+public:
+    nextLevelPtr(int numEntries); //Initializes node with amount of entries.
+
+    nextLevelPtr **level;//Array of pointers
+    unsigned int *pfns;
+
+    int numOfAccesses;
+    int numEntries;
+
+};
+
+#endif
+
+Recordpageaccess function: 
+
+void PageTable::recordPageAccess(unsigned int address) //THIS SHIT IS NEVER BEING CALLED ON... SO IT DOESNT KNOW HOW MANY NUM ENTRIES!
+{
+
+    nextLevelPtr* current = root; //Current pointing to root of tree.
+
+    /*
+     * Goes through every level of the tree...
+     * Then it creates the amount of entries for the current level.
+     * Copies entries from past addresses into current levels "entries" pointer array.
+     * Then it sets them all to null. (Below)
+     */
+
+    for (unsigned int i = 0; i < bitMaskArray.size(); ++i)
+    {
+        unsigned int index = extractPageNumberFromAddress(address, bitMaskArray[i], shiftArray[i]);
+        unsigned int size = 1 << levelCount[i];
+        nextLevelPtr** entries = new nextLevelPtr*[size];
+
+        for (unsigned int j = 0; j < current->numEntries; ++j)
+        {
+            entries[j] = current->level[j];
+        }
+
+        for (unsigned int j = current->numEntries; j < size; ++j)
+        {
+            entries[j] = nullptr;
+        }
+
+        /*
+         * Deletes old array of pointers.. (Below)
+         */
+
+        delete[] current->level;
+        current->level = entries; //Updates Level pointer array.
+        current->numEntries = size; //updates number of entries.
+
+        /*
+         * If there is no address entry, it creates a new node. (Below)
+         */
+
+        if (current->level[index] == nullptr)
+        {
+            current->level[index] = new nextLevelPtr(1);
+        }
+
+        current = current->level[index]; //Points to the next level of tree.
+        current->numOfAccesses++; //Updates number of accesses of node.
+    }
+
+    unsigned int pageIndices[bitMaskArray.size()]; //Array to store page indices..
+    nextLevelPtr *numAccessesCountPtr = root; //Point to traverse to the bottom of tree.
+
+    /*Traverse tree to find node for address..
+     * Sends to log to print address, page indices, and access count. (Below)
+     */
+
+    for (size_t i = 0; i < bitMaskArray.size(); ++i)
+    {
+        pageIndices[i] = extractPageNumberFromAddress(address, bitMaskArray[i], shiftArray[i]);
+        numAccessesCountPtr = numAccessesCountPtr->level[pageIndices[i]];
+    }
+
+    //log_pagemapping(bitMaskArray.size(), pageIndices, current->numOfAccesses);
+
+}
+
+MAIN:
+
+#include <iostream>
+#include <cstdio>
+#include <getopt.h> // For getopt
+#include <sstream>
+#include <vector>
+#include "tracereader.h"
+#include "PageTable.h"
+#include "TLB.h"
+#include "log.h"
+
+using namespace std;
+
+int main(int argc, char **argv) {
+    int n = -1;  // Default: process all memory addresses
+    string outputMode = "summary";  // Default output mode
+    int opt;
+
+    // Parse optional arguments using getopt
+    while ((opt = getopt(argc, argv, "n:o:")) != -1) {
+        switch (opt) {
+            case 'n':
+                n = stoi(optarg);  // Number of memory accesses to process
+                break;
+            case 'o':
+                outputMode = optarg;  // Output mode (e.g., "offset", "bitmasks", etc.)
+                break;
+            default:
+                cerr << "Usage: " << argv[0] << " [-n num_accesses] [-o output_mode] <trace_file> <bits_per_level>\n";
+                return 1;
+        }
+    }
+
+    // Ensure we have the correct number of arguments
+    if (optind + 2 >= argc) {
+        cerr << "Usage: " << argv[0] << " [-n num_accesses] [-o output_mode] <trace_file> <bits_per_level>\n";
+        return 1;
+    }
+
+    // Open the trace file (optional: if bitmasks are requested, we don't need to open it)
+    FILE *traceFile = nullptr;
+    if (outputMode != "bitmasks") {
+        traceFile = fopen(argv[optind], "rb");
+        if (!traceFile) {
+            cerr << "Unable to open " << argv[optind] << "\n";
+            return 1;
+        }
+    }
+
+    // Initialize the page table with the bit levels
+    string bitLevels; //= argv[optind + 1];
+    for (int i = optind + 1; i < argc; ++i)
+    {
+        if (!bitLevels.empty())
+        {
+            bitLevels += " ";
+        }
+        bitLevels += argv[i];
+    }
+
+    PageTable pageTable(bitLevels);
+
+    // Handle the bitmasks option
+    if (outputMode == "bitmasks") {
+        // The constructor of PageTable already calculates the bitmasks
+        // and we can use log_bitmasks to print them
+        log_bitmasks(pageTable.bitMaskArray.size(), pageTable.bitMaskArray.data());
+        return 0;  // Exit after printing the bitmasks
+    }
+
+    // Initialize the TLB (size can be changed as needed)
+    TLB tlb(10);
+
+    // Variables for tracking stats
+    unsigned int cacheHits = 0, pageTableHits = 0, addressesProcessed = 0;
+    unsigned int frameCounter = 0;  // For assigning PFNs (Physical Frame Numbers)
+
+    p2AddrTr trace;
+
+    // Process the trace file and handle the -n option
+    while (NextAddress(traceFile, &trace) && (n == -1 || addressesProcessed < (unsigned int)n)) {
+        addressesProcessed++;
+
+        pageTable.recordPageAccess(trace.addr);
+
+        // Extract the VPN from the address
+        unsigned int vpn = pageTable.extractVPN(trace.addr);
+
+        // Handle different output modes (e.g., "offset")
+        if (outputMode == "offset") {
+            // Extract and print the offset from the virtual address
+            unsigned int offset = trace.addr & ((1 << 12) - 1);  // 12 bits for offset (example)
+            hexnum(offset);  // This uses the log function to print the offset
+            continue;
+        }
+
+        // Look up the VPN in the TLB (if not in offset mode)
+        int pfn = tlb.lookup(vpn);
+        bool tlbHit = false, pageTableHit = false;
+
+
+        if (pfn == -1) {
+            // TLB miss: check the page table
+            Map* mapping = pageTable.lookup_vpn2pfn(trace.addr);
+
+            if (mapping) {
+                // Page table hit
+                pfn = mapping->pfn;
+                pageTableHit = true;
+                pageTableHits++;
+
+                // Insert the VPN-to-PFN mapping into the TLB
+                tlb.insert(vpn, pfn);
+            } else {
+                // Page table miss: allocate a new PFN
+                pageTable.insert_vpn2pfn(trace.addr, frameCounter);
+                tlb.insert(vpn, frameCounter);  // Insert into the TLB
+                pfn = frameCounter;
+                frameCounter++;  // Increment for next PFN
+            }
+        } else {
+            // TLB hit
+            tlbHit = true;
+            cacheHits++;
+            //cout << "HERE 2" << endl;
+        }
+
+
+
+        // Log the result using the provided logging function
+        if (outputMode == "va2pa" || outputMode == "va2pa_atc_ptwalk") {
+            log_va2pa_ATC_PTwalk(trace.addr, pfn, tlbHit, pageTableHit);
+        }
+    }
+
+    if (outputMode == "vpn2pfn") {
+        unsigned int pageIndices[pageTable.bitMaskArray.size()];  // To store the VPN for each level
+
+        // Extract the page number (VPN) for each level of the page table
+        nextLevelPtr* current = pageTable.root;  // Start from the root level
+        for (size_t i = 0; i < pageTable.bitMaskArray.size(); ++i) {
+            pageIndices[i] = pageTable.extractPageNumberFromAddress(trace.addr, pageTable.bitMaskArray[i], pageTable.shiftArray[i]);
+            current = current->level[pageIndices[i]];  // Move to the next level in the tree
+        }
+
+        // Log the VPN-to-PFN mapping using log_pagemapping
+        log_pagemapping(pageTable.bitMaskArray.size(), pageIndices, current->numOfAccesses);
+    }
+
+    // Print the summary if not in offset mode
+    if (outputMode == "summary") {
+        unsigned long int totalEntries = pageTable.getTotalEntries();  // Calculate total page table entries
+        log_summary(4096, cacheHits, pageTableHits, addressesProcessed, frameCounter, totalEntries);
+    }
+
+    fclose(traceFile);
+    return 0;
+}
